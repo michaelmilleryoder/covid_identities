@@ -14,6 +14,8 @@ from glob import glob
 import gzip
 import json
 import shutil
+import pickle
+import itertools
 
 from tqdm import tqdm
 import pandas as pd
@@ -53,12 +55,11 @@ def process_tweets(data):
     data = data[sorted(data.columns)]
     return data.drop(columns='text')
 
+
 def match_identities(text, identity_pat):
     """ Search within a text for identity matches, return them and the spans they occur in """
-    #all_matches = re.findall(identity_pat, str(text).lower())
-    all_matches = list(re.finditer(identity_pat, str(text)))
+    all_matches = list(re.finditer(identity_pat, str(text).lower()))
     #limit = 20 # limit for number of unique identity mentions for each post
-    
     res = []
     spans = []
     #ctr = Counter()
@@ -78,41 +79,83 @@ def match_identities(text, identity_pat):
     return res, spans
 
 
+def term_in_vocab(term, vocab):
+    """ Returns if a term is in the vocab """
+    unigrams = term.lower().split()
+    for wd in unigrams:
+        if wd in vocab:
+            return term
+    else:
+        return None
+
+
 class IdentityExtractor():
 
-    def __init__(self, load_vocab=False, overwrite=False):
+    def __init__(self, load_vocab=False, vocab_path='../tmp/vocab.pkl', pat_path='../tmp/pat.pkl', overwrite=False, n_cores=1):
         """ Args:
             load_vocab: If False, will build unigram vocab from all the Twitter dumps
+            vocab_path: path to load vocab from (if load_vocab is True) or save vocab to (if load_vocab is False).
+                Default is ../tmp/vocab.pkl. Will save to pickle
             overwrite: If True, will overwrite any existing files already saved out from extraction
+            n_cores: number of processors to use
         """
         self.load_vocab = load_vocab
+        self.vocab_path = vocab_path
+        self.pat_path = pat_path
         self.overwrite = overwrite
-        self.identities_path = '../resources/antisemitic_terms.txt'
+        self.n_cores = n_cores
+        self.identities_path = '../resources/generic_agents-identity_v26_Netanomics.xlsx'
         self.identities = None
         self.basepath = '/storage3/coronavirus/'
         self.paths = None
         self.n_selected = 0
+        self.identity_pat = None
+        self.vocab = None
 
-    def load_identities(self, vocab):
+    def load_identities(self):
         """ Load, filter identities to just those that are present in the vocab
-            Args:
-                vocab: a set of unique strings
         """
-        print("Loading, filtering identity list...")
-        identities = pd.read_excel(self.identities_path).drop_duplicates('English')['English'].tolist()
-        self.identities = [term for term in identities if term in vocab]
-        print(f"\t{len(self.identities)} present in vocabulary out of {len(identities)}")
-        self.pats = [re.compile(r'\b{}\b'.format(re.escape(term))) for term in self.identities]
+        if os.path.exists(self.pat_path) and self.load_vocab and not self.overwrite:
+            print("Loading identity list...")
+            with open(self.pat_path, 'rb') as f:
+                self.identity_pat = pickle.load(f)
+            print(f"\tLoaded identities regex pattern from {self.pat_path}")
+
+        else: # create pattern
+            print("Filtering identity list...")
+            identities = pd.read_excel(self.identities_path)
+            identities['english'] = identities['English'].str.lower()
+            identities = identities.drop_duplicates('english')['english'].tolist()
+            #unigram_identities = [term for term in identities if ' ' not in term]
+            #mw_identities = [term for term in identities if ' ' in term]
+
+            filtered = [term_in_vocab(term, self.vocab) for term in tqdm(identities, ncols=80)] # for debugging
+            filtered = [term for term in filtered if term is not None]
+            #self.identities = unigram_identities + mw_identities
+            self.identities = filtered
+            print(f"\t{len(self.identities)} present in vocabulary out of {len(identities)}")
+            self.identity_pat = re.compile(r'|'.join([r'\b{}\b'.format(re.escape(term)) for term in self.identities]))
+
+            # Save out filtered identities
+            filtered_outpath = '../tmp/filtered_identities.json'
+            with open(filtered_outpath, 'w') as f:
+                json.dump(self.identities, f, indent=4)
+            print(f"\tSaved filtered identities to {filtered_outpath}")
+
+            # Save out pattern since took a long time to load
+            with open(self.pat_path, 'wb') as f:
+                pickle.dump(self.identity_pat, f)
+            print(f"\tSaved identity regex patterns to {self.pat_path}")
 
     def select_tweet(self, tweet):
         """ See if a tweet is worth keeping (matches enough criteria).
             Extract identities from user bio if tweet does match criteria.
         """
-        select = False
+        matches, spans = None, None
         
         # Basic cleaning
         if len(tweet) == 1 and 'limit' in tweet:
-            return select
+            return matches, spans
         
         # Language is English
         # TODO: change to checking for user language
@@ -121,16 +164,16 @@ class IdentityExtractor():
 
         # Check for containing a user description
         if not 'user' in tweet:
-            return select
+            return matches, spans
         if tweet['user']['description'] is None:
-            return select
+            return matches, spans
         
         # Contains identity terms
         #if 'extended_tweet' in tweet:
         #    text = tweet['extended_tweet']['full_text'].lower()
         #else:
         #    text = tweet['text'].lower()
-        matches, spans = match_identities(tweet['user']['description'])
+        matches, spans = match_identities(tweet['user']['description'], self.identity_pat)
         #for p in self.pats:
         #    m = re.search(p, text)
         #    # if any([re.search(p, tweet['extended_tweet']['full_text'].lower()) for p in pats]):
@@ -138,7 +181,7 @@ class IdentityExtractor():
         #        select = m.group()
         #        # tqdm.write('one selected')
                 
-        return select
+        return matches, spans
 
     def load_process_tweets(self):
         """ Load tweets that have been filtered and saved already.
@@ -163,15 +206,17 @@ class IdentityExtractor():
         """ Process a jsonlines dumped Twitter file """
         selected = []
         fname = os.path.basename(fpath)
+        tqdm.write(fname)
         outpath = os.path.join('../output', 'tweets_json', f'{fname.split(".")[0]}.jsonl')
         #csv_outpath = os.path.join('../output', 'tweets_csv', f'{fname.split(".")[0]}.csv')
         if os.path.exists(outpath) and not self.overwrite: # already processed
             return
 
-        #tqdm.write(fname)
+        # Build set of unique bios, just extract on those
+        bios = set()
+        #limit = 100
+        #ctr = 0
         with gzip.open(fpath, 'rb') as f:
-            #for i, line in tqdm(enumerate(f), total=974483):
-            # for i, line in tqdm(enumerate(f), total=974483, bar_format='selected: {postfix} | Elapsed: {elapsed} | {rate_fmt}', postfix=n_selected):
             for line in f:
                 if len(line) == 1:
                     continue
@@ -183,20 +228,49 @@ class IdentityExtractor():
                 except UnicodeDecodeError:
                     tqdm.write('unicode decode error')
                     continue
-                match = self.select_tweet(tweet)
-                if match:
-                    tweet['search_match'] = match
-                    selected.append(tweet)
-                # if i > 100:
+                if not 'user' in tweet:
+                    continue
+                bios.add(tweet['user']['description'])
+                #ctr += 1
+                #if ctr == 100:
+                #    break
+        #matches_spans = [match_identities(bio, self.identity_pat) for bio in tqdm(bios, ncols=80)]
+        matches_spans = [match_identities(bio, self.identity_pat) for bio in bios]
+        matches, spans = list(zip(*matches_spans))
+        bio_matches = pd.DataFrame(list(zip(bios, matches, spans)), columns=['bio', 'identities', 'identity_spans'])
+        extracted = bio_matches[bio_matches['identities'].map(lambda x: len(x) > 1)]
+        # Save out bio matches
+        extracted.to_json(outpath, orient='records', lines=True)
 
-        # Save out selected
-        with open(outpath, 'w') as f:
-            f.write('\n'.join([json.dumps(tweet) for tweet in selected]))
-        #with open(csv_outpath, 'w') as f:
-        #    df = pd.json_normalize(selected)
-        #    if 'text' in df.columns:
-        #        processed = process_tweets(df)
-        #        processed.to_csv(csv_outpath)
+        # Run extraction on every tweet
+        #with gzip.open(fpath, 'rb') as f:
+        #    #for i, line in tqdm(enumerate(f), total=974483):
+        #    # for i, line in tqdm(enumerate(f), total=974483, bar_format='selected: {postfix} | Elapsed: {elapsed} | {rate_fmt}', postfix=n_selected):
+        #    for line in f:
+        #        if len(line) == 1:
+        #            continue
+        #        try:
+        #            tweet = json.loads(line)
+        #        except json.decoder.JSONDecodeError:
+        #            tqdm.write('json decode error')
+        #            continue
+        #        except UnicodeDecodeError:
+        #            tqdm.write('unicode decode error')
+        #            continue
+        #        match = self.select_tweet(tweet)
+        #        if match:
+        #            tweet['search_match'] = match
+        #            selected.append(tweet)
+        #        # if i > 100:
+
+        ## Save out selected
+        #with open(outpath, 'w') as f:
+        #    f.write('\n'.join([json.dumps(tweet) for tweet in selected]))
+        ##with open(csv_outpath, 'w') as f:
+        ##    df = pd.json_normalize(selected)
+        ##    if 'text' in df.columns:
+        ##        processed = process_tweets(df)
+        ##        processed.to_csv(csv_outpath)
 
     def build_vocab(self, fpath):
         """ Build unigram vocabulary from bios in a JSON tweet dump, save out as json """
@@ -204,10 +278,29 @@ class IdentityExtractor():
         fname = os.path.basename(fpath)
         outpath = os.path.join('../output', 'vocab', f'{fname.split(".")[0]}.json')
         #csv_outpath = os.path.join('../output', 'tweets_csv', f'{fname.split(".")[0]}.csv')
-        if os.path.exists(outpath):
+        if os.path.exists(outpath) and not self.overwrite:
             return
 
         #tqdm.write(fname)
+        # pandas way
+        #bios = []
+        #with gzip.open(fpath, 'rb') as f:
+        #    for line in f:
+        #        if len(line) == 1:
+        #            continue
+        #        try:
+        #            tweet = json.loads(line)
+        #        except json.decoder.JSONDecodeError:
+        #            tqdm.write('json decode error')
+        #            continue
+        #        except UnicodeDecodeError:
+        #            tqdm.write('unicode decode error')
+        #            continue
+        #        if 'user' in tweet and tweet['user']['description'] is not None:
+        #            bios.append(tweet['user']['description'])
+        #pd.Series(bios).str.lower().str.split().apply(vocab.update) # TODO: probably could get rid of Series overhead
+
+        # Line-by-line way
         with gzip.open(fpath, 'rb') as f:
             for line in f:
                 if len(line) == 1:
@@ -221,7 +314,7 @@ class IdentityExtractor():
                     tqdm.write('unicode decode error')
                     continue
                 if 'user' in tweet and tweet['user']['description'] is not None:
-                    vocab |= set([wd for wd in tweet['user']['description'].split()])
+                    vocab.update(tweet['user']['description'].lower().split())
 
         # Save out dump's vocab (to later combine)
         with open(outpath, 'w') as f:
@@ -240,11 +333,9 @@ class IdentityExtractor():
         return paths
 
     def run(self):
-        n_cores = 20
-
         #csv_dirpath = os.path.join('../output', 'tweets_csv')
         json_dirpath = os.path.join('../output', 'tweets_json')
-        if self.overwrite:
+        #if self.overwrite:
             #if os.path.exists(csv_dirpath):
             #    shutil.rmtree(csv_dirpath)
             #os.mkdir(csv_dirpath)
@@ -253,22 +344,39 @@ class IdentityExtractor():
 
         input_paths = self.tweet_dump_paths()
 
-        if not self.load_vocab:
+        if self.load_vocab:
+            print("Loading vocab...")
+
+            # Load vocab
+            with open(self.vocab_path, 'rb') as f:
+                self.vocab = pickle.load(f)
+
+        else:
             print("Building vocab...")
-            with Pool(n_cores) as p:
+            with Pool(self.n_cores) as p:
                 list(tqdm(p.imap(self.build_vocab, input_paths), ncols=80, total=len(input_paths)))
+            #list(map(self.build_vocab, input_paths)) # debugging
+
             # Combine vocabs
-            vocab = set()
+            self.vocab = set()
             vocab_dirpath = '../output/vocab/*'
-            for path in tqdm(glob(vocab_dirpath)):
-                vocab |= set(json.load(path))
-            print(f"\tBuilt unigram vocab of {len(vocab)} words")
+            print("\tCombining vocabs...")
+            for path in tqdm(glob(vocab_dirpath), ncols=80):
+                #tqdm.write(path)
+                with open(path) as f:
+                    self.vocab.update([w.lower() for w in json.load(f)])
+            print(f"\tBuilt unigram vocab of {len(self.vocab)} words")
+
+            # Save out vocab
+            with open(self.vocab_path, 'wb') as f:
+                pickle.dump(self.vocab, f)
 
         print("Extracting identities...")
-        self.load_identities(vocab)
-        with Pool(n_cores) as p:
-            list(tqdm(p.imap(self.process_dump, paths), ncols=80, total=len(input_paths)))
-        #list(map(self.process_dump, paths)) # debugging
+        self.load_identities()
+        print("\tMatching identities...")
+        with Pool(self.n_cores) as p:
+            list(tqdm(p.imap(self.process_dump, input_paths), ncols=80, total=len(input_paths)))
+        #list(map(self.process_dump, input_paths)) # debugging
 
         #self.load_process_tweets()
     
@@ -276,5 +384,5 @@ class IdentityExtractor():
 
 
 if __name__ == '__main__':
-    tweet_filter = IdentityExtractor(load_vocab=False, overwrite=True)
+    tweet_filter = IdentityExtractor(load_vocab=True, overwrite=False, n_cores=25)
     tweet_filter.run()
