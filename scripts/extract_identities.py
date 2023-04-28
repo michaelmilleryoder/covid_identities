@@ -81,6 +81,7 @@ def match_identities(text, identity_pat):
 
 def term_in_vocab(term, vocab):
     """ Returns if a term is in the vocab """
+    # TODO: change to only return multi-word terms if all unigrams are in vocab
     unigrams = term.lower().split()
     for wd in unigrams:
         if wd in vocab:
@@ -214,6 +215,7 @@ class IdentityExtractor():
 
         # Build set of unique bios, just extract on those
         bios = set()
+        # TODO: save out username and possibly timestamp of first occurrence as well (probably as dicts)
         #limit = 100
         #ctr = 0
         with gzip.open(fpath, 'rb') as f:
