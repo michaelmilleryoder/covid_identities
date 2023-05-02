@@ -18,6 +18,7 @@ import pickle
 import itertools
 
 from tqdm import tqdm
+from tqdm.contrib.concurrent import process_map
 import pandas as pd
 
 
@@ -88,6 +89,99 @@ def term_in_vocab(term, vocab):
             return term
     else:
         return None
+
+
+def process_bios_dump_star(args):
+    process_bios_dump(*args)
+
+
+def process_bios_dump(fpath, overwrite, identity_pat):
+    """ Extract identities from bios in a jsonlines dumped Twitter file """
+    selected = []
+    fname = os.path.basename(fpath)
+    outpath = os.path.join('../output', 'tweets_json', f'{fname.split(".")[0]}.jsonl')
+    if os.path.exists(outpath) and not overwrite: # already processed
+        return
+
+    tqdm.write(fname)
+    # Build set of unique bios, just extract on those
+    bios = set()
+    first_ts = dict() # (username, bio): first_timestamp
+    # TODO: save out username and possibly timestamp of first occurrence as well (probably as dicts)
+    #limit = 100
+    #ctr = 0
+    with gzip.open(fpath, 'rb') as f:
+        for line in f:
+            if len(line) == 1:
+                continue
+            try:
+                tweet = json.loads(line)
+            except json.decoder.JSONDecodeError:
+                tqdm.write('json decode error')
+                continue
+            except UnicodeDecodeError:
+                tqdm.write('unicode decode error')
+                continue
+            if not 'user' in tweet:
+                continue
+            bios.add(tweet['user']['description'])
+            #ctr += 1
+            #if ctr == 100:
+            #    break
+    if len(bios) == 0:
+        return # probably is an error case that be looked into
+    #matches_spans = [match_identities(bio, self.identity_pat) for bio in tqdm(bios, ncols=80)]
+    matches_spans = [match_identities(bio, identity_pat) for bio in bios]
+    matches, spans = list(zip(*matches_spans))
+    bio_matches = pd.DataFrame(list(zip(bios, matches, spans)), columns=['bio', 'identities', 'identity_spans'])
+    extracted = bio_matches[bio_matches['identities'].map(lambda x: len(x) > 1)]
+    # Save out bio matches
+    extracted.to_json(outpath, orient='records', lines=True)
+
+
+def merge_bios_tweets_star(args):
+    merge_bios_tweets(*args)
+
+
+def merge_bios_tweets(bio_path, tweet_paths):
+    """ Merge bios, with extracted identities, to tweets. Save out """
+    base_biopath = os.path.splitext(os.path.basename(bio_path))[0]
+    tweet_path = [p for p in tweet_paths if os.path.basename(p).split('.')[0] == base_biopath][0]
+
+    # Load bios
+    bios = pd.read_json(bio_path, lines=True)
+
+    # Load tweets
+    ctr = 0
+    limit = 100
+    with gzip.open(tweet_path, 'rb') as f:
+        tweets_dicts = []
+        # lines = [line for line in f.read().splitlines() if len(line) > 1]
+        # for line in tqdm(lines):
+        for line in f:
+            if ctr == limit:
+                break
+            try:
+                tweet = json.loads(line)
+            except json.decoder.JSONDecodeError:
+                tqdm.write('json decode error')
+                continue
+            except UnicodeDecodeError:
+                tqdm.write('unicode decode error')
+                continue
+            if not 'user' in tweet:
+                continue
+            tweets_dicts.append({'id_str': tweet['id_str'], 'created_at': tweet['created_at'], 
+                                 'user.id_str': tweet['user']['id_str'], 'user.name': tweet['user']['name'],
+                                'user.description': tweet['user']['description']}
+                                )
+            ctr += 1
+    tweets = pd.DataFrame(tweets_dicts)
+    merged = pd.merge(tweets, bios, left_on='user.description', right_on='bio')
+
+    # Save out
+    outpath = os.path.join('../output', 'tweets_identities', f'{base_biopath}.jsonl')
+    merged.to_json(outpath, orient='records', lines=True)
 
 
 class IdentityExtractor():
@@ -207,7 +301,7 @@ class IdentityExtractor():
         """ Process a jsonlines dumped Twitter file """
         selected = []
         fname = os.path.basename(fpath)
-        tqdm.write(fname)
+        tqdm.write(f'\n{fname}')
         outpath = os.path.join('../output', 'tweets_json', f'{fname.split(".")[0]}.jsonl')
         #csv_outpath = os.path.join('../output', 'tweets_csv', f'{fname.split(".")[0]}.csv')
         if os.path.exists(outpath) and not self.overwrite: # already processed
@@ -215,6 +309,7 @@ class IdentityExtractor():
 
         # Build set of unique bios, just extract on those
         bios = set()
+        first_ts = dict() # (username, bio): first_timestamp
         # TODO: save out username and possibly timestamp of first occurrence as well (probably as dicts)
         #limit = 100
         #ctr = 0
@@ -236,6 +331,8 @@ class IdentityExtractor():
                 #ctr += 1
                 #if ctr == 100:
                 #    break
+        if len(bios) == 0:
+            return # probably is an error case that be looked into
         #matches_spans = [match_identities(bio, self.identity_pat) for bio in tqdm(bios, ncols=80)]
         matches_spans = [match_identities(bio, self.identity_pat) for bio in bios]
         matches, spans = list(zip(*matches_spans))
@@ -322,6 +419,14 @@ class IdentityExtractor():
         with open(outpath, 'w') as f:
             json.dump(list(vocab), f)
 
+    def match_bios(self):
+        """ Match unique bios with extracted identities with tweets from users with those bios """
+        # Load bios with extracted identities
+        bio_paths = glob(os.path.join('../output', 'tweets_json','*'))
+        tweet_paths = self.tweet_dump_paths()
+        zipped = list(zip(bio_paths, itertools.repeat(tweet_paths)))
+        list(map(merge_bios_tweets_star, tqdm(zipped, ncols=80, total=len(bio_paths))))
+
     def tweet_dump_paths(self):
         """ Returns list of all COVID twitter dump paths """
         # Older data
@@ -376,15 +481,21 @@ class IdentityExtractor():
         print("Extracting identities...")
         self.load_identities()
         print("\tMatching identities...")
-        with Pool(self.n_cores) as p:
-            list(tqdm(p.imap(self.process_dump, input_paths), ncols=80, total=len(input_paths)))
-        #list(map(self.process_dump, input_paths)) # debugging
+        zipped = list(zip(input_paths, itertools.repeat(self.overwrite), itertools.repeat(self.identity_pat)))
+        process_map(process_bios_dump_star, zipped, max_workers=25, ncols=80, total=len(input_paths))
+        #with Pool(self.n_cores) as p:
+        #    #list(tqdm(p.imap(self.process_dump, input_paths), ncols=80, total=len(input_paths)))
+        #    list(tqdm(p.imap(process_bios_dump_star, zipped), ncols=80, total=len(input_paths)))
+        #    #p.starmap(process_bios_dump, tqdm(zipped, ncols=80, total=len(zipped)), chunksize=3)
+        #list(map(process_bios_dump_star, tqdm(zipped, ncols=80, total=len(zipped)))) # debugging
 
         #self.load_process_tweets()
+        #self.match_bios()
     
         #print(Counter([select['search_match'] for select in selected]).most_common())
 
 
 if __name__ == '__main__':
     tweet_filter = IdentityExtractor(load_vocab=True, overwrite=False, n_cores=25)
-    tweet_filter.run()
+    #tweet_filter.run()
+    tweet_filter.match_bios()
