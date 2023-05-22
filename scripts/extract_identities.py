@@ -151,11 +151,10 @@ def match_identities_tweets(tweets_fpath, dump_fpath, identity_pat):
     fname = os.path.basename(tweets_fpath)
     outpath = os.path.join('../output', 'tweets_bios_identities', fname)
 
-    # Load tweet IDs
-    tweets_bios = pd.read_json(tweets_fpath, lines=True)
-
     # Load tweet texts
     lines = []
+    #limit = 50
+    #ctr = 0
     with gzip.open(dump_fpath, 'rb') as f:
         for line in f:
             if len(line) == 1:
@@ -170,11 +169,24 @@ def match_identities_tweets(tweets_fpath, dump_fpath, identity_pat):
                 continue
             if not 'user' in tweet:
                 continue
-            lines.append({'id_str': tweet['id_str'], 'text': tweet['extended_tweet']['full_text']})
+            if 'extended_tweet' in tweet:
+                text = tweet['extended_tweet']['full_text']
+                # TODO: not sure if this actually captures any
+            else:
+                text = tweet['text']
+            lines.append({'id_str': tweet['id_str'], 'text': text})
+            #ctr += 1
+            #if ctr == limit:
+            #    break
     tweets_texts = pd.DataFrame(lines).set_index('id_str')
-    pdb.set_trace() # check to see data table sizes
-    tweets_bios_texts = tweets_bios.join(tweets_texts, on='id_str')
-    matches_spans = [match_identities(text, identity_pat) for text in tweets_bios_texts.text]
+
+    # Load tweet IDs
+    tweets_bios = pd.read_json(tweets_fpath, lines=True)
+    tweets_bios['id_str'] = tweets_bios['id_str'].astype(str)
+
+    # Merge
+    tweets_bios_texts = tweets_bios.join(tweets_texts, on='id_str').dropna(subset='text')
+    matches_spans = [match_identities(text, identity_pat) for text in tweets_bios_texts.text.tolist()]
     tweets_bios_texts['tweet_identities'], tweets_bios_texts['tweet_identity_spans'] = list(zip(*matches_spans))
 
     # Save out
@@ -549,18 +561,23 @@ class IdentityExtractor():
         for fpath in self.tweet_dump_paths():
             fname = os.path.basename(fpath)
             matches = glob(os.path.join('../output', 'tweets_identities', f'{fname.split(".")[0]}.*'))
-            if len(tweet_bio_paths) == 1:
+            if len(matches) == 1:
                 dump_paths.append(fpath) 
                 tweet_bio_paths.append(matches[0])  
-        pdb.set_trace() # check for lengths of lists of paths
+        # TODO: look into why there are many fewer matched files
 
-        print('Extracting identities from texts...')
+        print("Extracting identities...")
+        self.load_identities()
+
+        print('Matching identities from tweet texts...')
         out_dirpath = os.path.join('../output', 'tweets_bios_identities')
         if not os.path.exists(out_dirpath):
             os.mkdir(out_dirpath)
-        zipped = list(zip(dump_paths, tweet_bio_paths, itertools.repeat(self.identity_pat)))
-        #process_map(match_identities_tweets_star, zipped, max_workers=self.n_cores, ncols=80, total=len(dump_paths))
-        list(map(match_identities_tweets_star, zipped)) # debugging
+        zipped = list(zip(tweet_bio_paths, dump_paths, itertools.repeat(self.identity_pat)))
+        process_map(match_identities_tweets_star, zipped, max_workers=self.n_cores, ncols=80, total=len(dump_paths))
+        #list(map(match_identities_tweets_star, zipped)) # debugging, but takes a long time for some reason
+        #for el in zipped: # debugging
+        #    match_identities_tweets_star(el)
 
 
 if __name__ == '__main__':
