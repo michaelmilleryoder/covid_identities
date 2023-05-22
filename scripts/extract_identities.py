@@ -21,6 +21,8 @@ from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
 import pandas as pd
 
+# TODO: remove much unnecessary code, clean up processes
+
 
 def remove_mentions(text, user_mentions):
     """ Remove mentions from a text """
@@ -139,6 +141,46 @@ def process_bios_dump(fpath, overwrite, identity_pat):
     extracted.to_json(outpath, orient='records', lines=True)
 
 
+def match_identities_tweets_star(args):
+    match_identities_tweets(*args)
+
+
+def match_identities_tweets(tweets_fpath, dump_fpath, identity_pat):
+    """ Extract identities from tweet texts """
+
+    fname = os.path.basename(tweets_fpath)
+    outpath = os.path.join('../output', 'tweets_bios_identities', fname)
+
+    # Load tweet IDs
+    tweets_bios = pd.read_json(tweets_fpath, lines=True)
+
+    # Load tweet texts
+    lines = []
+    with gzip.open(dump_fpath, 'rb') as f:
+        for line in f:
+            if len(line) == 1:
+                continue
+            try:
+                tweet = json.loads(line)
+            except json.decoder.JSONDecodeError:
+                tqdm.write('json decode error')
+                continue
+            except UnicodeDecodeError:
+                tqdm.write('unicode decode error')
+                continue
+            if not 'user' in tweet:
+                continue
+            lines.append({'id_str': tweet['id_str'], 'text': tweet['extended_tweet']['full_text']})
+    tweets_texts = pd.DataFrame(lines).set_index('id_str')
+    pdb.set_trace() # check to see data table sizes
+    tweets_bios_texts = tweets_bios.join(tweets_texts, on='id_str')
+    matches_spans = [match_identities(text, identity_pat) for text in tweets_bios_texts.text]
+    tweets_bios_texts['tweet_identities'], tweets_bios_texts['tweet_identity_spans'] = list(zip(*matches_spans))
+
+    # Save out
+    tweets_bios_texts.to_json(outpath, orient='records', lines=True)
+
+
 def merge_bios_tweets_star(args):
     merge_bios_tweets(*args)
 
@@ -152,15 +194,17 @@ def merge_bios_tweets(bio_path, tweet_paths):
     bios = pd.read_json(bio_path, lines=True)
 
     # Load tweets
-    ctr = 0
-    limit = 100
+    #ctr = 0 # debugging
+    #limit = 100
     with gzip.open(tweet_path, 'rb') as f:
         tweets_dicts = []
         # lines = [line for line in f.read().splitlines() if len(line) > 1]
         # for line in tqdm(lines):
         for line in f:
-            if ctr == limit:
-                break
+            #if ctr == limit:
+            #    break
+            if len(line) == 1:
+                continue
             try:
                 tweet = json.loads(line)
             except json.decoder.JSONDecodeError:
@@ -175,7 +219,7 @@ def merge_bios_tweets(bio_path, tweet_paths):
                                  'user.id_str': tweet['user']['id_str'], 'user.name': tweet['user']['name'],
                                 'user.description': tweet['user']['description']}
                                 )
-            ctr += 1
+            #ctr += 1
     tweets = pd.DataFrame(tweets_dicts)
     merged = pd.merge(tweets, bios, left_on='user.description', right_on='bio')
 
@@ -425,7 +469,9 @@ class IdentityExtractor():
         bio_paths = glob(os.path.join('../output', 'tweets_json','*'))
         tweet_paths = self.tweet_dump_paths()
         zipped = list(zip(bio_paths, itertools.repeat(tweet_paths)))
-        list(map(merge_bios_tweets_star, tqdm(zipped, ncols=80, total=len(bio_paths))))
+        #list(map(merge_bios_tweets_star, tqdm(zipped, ncols=80, total=len(bio_paths)))) # debugging
+        print("Matching bios with tweets...")
+        process_map(merge_bios_tweets_star, zipped, max_workers=25, ncols=80, total=len(bio_paths))
 
     def tweet_dump_paths(self):
         """ Returns list of all COVID twitter dump paths """
@@ -440,6 +486,7 @@ class IdentityExtractor():
         return paths
 
     def run(self):
+        """ Extract identities from unique bios """
         #csv_dirpath = os.path.join('../output', 'tweets_csv')
         json_dirpath = os.path.join('../output', 'tweets_json')
         #if self.overwrite:
@@ -494,8 +541,30 @@ class IdentityExtractor():
     
         #print(Counter([select['search_match'] for select in selected]).most_common())
 
+    def extract_identities_tweets(self):
+        """ Extract identities from tweets by users with at least one identified identity term (output of match_bios) """
+
+        dump_paths = []
+        tweet_bio_paths = []
+        for fpath in self.tweet_dump_paths():
+            fname = os.path.basename(fpath)
+            matches = glob(os.path.join('../output', 'tweets_identities', f'{fname.split(".")[0]}.*'))
+            if len(tweet_bio_paths) == 1:
+                dump_paths.append(fpath) 
+                tweet_bio_paths.append(matches[0])  
+        pdb.set_trace() # check for lengths of lists of paths
+
+        print('Extracting identities from texts...')
+        out_dirpath = os.path.join('../output', 'tweets_bios_identities')
+        if not os.path.exists(out_dirpath):
+            os.mkdir(out_dirpath)
+        zipped = list(zip(dump_paths, tweet_bio_paths, itertools.repeat(self.identity_pat)))
+        #process_map(match_identities_tweets_star, zipped, max_workers=self.n_cores, ncols=80, total=len(dump_paths))
+        list(map(match_identities_tweets_star, zipped)) # debugging
+
 
 if __name__ == '__main__':
     tweet_filter = IdentityExtractor(load_vocab=True, overwrite=False, n_cores=25)
     #tweet_filter.run()
-    tweet_filter.match_bios()
+    #tweet_filter.match_bios()
+    tweet_filter.extract_identities_tweets()
