@@ -145,11 +145,13 @@ def match_identities_tweets_star(args):
     match_identities_tweets(*args)
 
 
-def match_identities_tweets(tweets_fpath, dump_fpath, identity_pat):
+def match_identities_tweets(tweets_fpath, dump_fpath, overwrite, identity_pat):
     """ Extract identities from tweet texts """
 
     fname = os.path.basename(tweets_fpath)
     outpath = os.path.join('../output', 'tweets_bios_identities', fname)
+    if os.path.exists(outpath) and not overwrite: # already processed
+        return
 
     # Load tweet texts
     lines = []
@@ -573,7 +575,7 @@ class IdentityExtractor():
         out_dirpath = os.path.join('../output', 'tweets_bios_identities')
         if not os.path.exists(out_dirpath):
             os.mkdir(out_dirpath)
-        zipped = list(zip(tweet_bio_paths, dump_paths, itertools.repeat(self.identity_pat)))
+        zipped = list(zip(tweet_bio_paths, dump_paths, itertools.repeat(self.overwrite), itertools.repeat(self.identity_pat)))
         process_map(match_identities_tweets_star, zipped, max_workers=self.n_cores, ncols=80, total=len(dump_paths))
         #list(map(match_identities_tweets_star, zipped)) # debugging, but takes a long time for some reason
         #for el in zipped: # debugging
