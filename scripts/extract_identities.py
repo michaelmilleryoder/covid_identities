@@ -153,48 +153,47 @@ def match_identities_tweets(tweets_fpath, dump_fpath, overwrite, identity_pat):
     if os.path.exists(outpath) and not overwrite: # already processed
         return
 
-    # Load tweet texts
-    lines = []
-    #limit = 50
-    #ctr = 0
-    with gzip.open(dump_fpath, 'rb') as f:
-        for line in f:
-            if len(line) == 1:
-                continue
-            try:
-                tweet = json.loads(line)
-            except json.decoder.JSONDecodeError:
-                tqdm.write('json decode error')
-                continue
-            except UnicodeDecodeError:
-                tqdm.write('unicode decode error')
-                continue
-            if not 'user' in tweet:
-                continue
-            if 'extended_tweet' in tweet:
-                text = tweet['extended_tweet']['full_text']
-                # TODO: not sure if this actually captures any
-            else:
-                text = tweet['text']
-            lines.append({'id_str': tweet['id_str'], 'text': text})
-            #ctr += 1
-            #if ctr == limit:
-            #    break
-    tweets_texts = pd.DataFrame(lines).set_index('id_str')
+    ## Load tweet texts
+    #lines = []
+    ##limit = 50
+    ##ctr = 0
+    #with gzip.open(dump_fpath, 'rb') as f:
+    #    for line in f:
+    #        if len(line) == 1:
+    #            continue
+    #        try:
+    #            tweet = json.loads(line)
+    #        except json.decoder.JSONDecodeError:
+    #            tqdm.write('json decode error')
+    #            continue
+    #        except UnicodeDecodeError:
+    #            tqdm.write('unicode decode error')
+    #            continue
+    #        if not 'user' in tweet:
+    #            continue
+    #        if 'extended_tweet' in tweet:
+    #            text = tweet['extended_tweet']['full_text']
+    #            # TODO: not sure if this actually captures any
+    #        else:
+    #            text = tweet['text']
+    #        lines.append({'id_str': tweet['id_str'], 'text': text})
+    #        #ctr += 1
+    #        #if ctr == limit:
+    #        #    break
+    #tweets_texts = pd.DataFrame(lines).set_index('id_str')
 
-    # Load tweet IDs
+    # Load tweet IDs and texts
     tweets_bios = pd.read_json(tweets_fpath, lines=True)
     tweets_bios['id_str'] = tweets_bios['id_str'].astype(str)
 
-    # Merge
-    pdb.set_trace() # check df sizes
-    tweets_bios_texts = tweets_bios.join(tweets_texts, on='id_str')
-    tweets_bios_texts.dropna(subset='text', inplace=True)
-    matches_spans = [match_identities(text, identity_pat) for text in tweets_bios_texts.text.tolist()]
-    tweets_bios_texts['tweet_identities'], tweets_bios_texts['tweet_identity_spans'] = list(zip(*matches_spans))
+    # Merge (shouldn't be needed anymore)
+    #tweets_bios_texts = tweets_bios.join(tweets_texts, on='id_str')
+    #tweets_bios_texts.dropna(subset='text', inplace=True)
+    matches_spans = [match_identities(text, identity_pat) for text in tweets_bios.text.tolist()]
+    tweets_bios['tweet_identities'], tweets_bios['tweet_identity_spans'] = list(zip(*matches_spans))
 
     # Save out
-    tweets_bios_texts.to_json(outpath, orient='records', lines=True)
+    tweets_bios.to_json(outpath, orient='records', lines=True)
 
 
 def merge_bios_tweets_star(args):
@@ -495,9 +494,9 @@ class IdentityExtractor():
     def match_bios(self):
         """ Match unique bios with extracted identities with tweets from users with those bios """
         # Load bios with extracted identities
-        bio_paths = glob(os.path.join('../output', 'tweets_json','*'))
+        bio_paths = sorted(glob(os.path.join('../output', 'tweets_json','*')))
         tweet_paths = self.tweet_dump_paths()
-        zipped = list(zip(sorted(bio_paths), itertools.repeat(tweet_paths)))
+        zipped = list(zip(bio_paths, itertools.repeat(tweet_paths)))
         #list(map(merge_bios_tweets_star, tqdm(zipped, ncols=80, total=len(bio_paths)))) # debugging
         print("Matching bios with tweets...")
         process_map(merge_bios_tweets_star, zipped, max_workers=25, ncols=80, total=len(bio_paths))
@@ -591,8 +590,8 @@ class IdentityExtractor():
         if not os.path.exists(out_dirpath):
             os.mkdir(out_dirpath)
         zipped = list(zip(tweet_bio_paths, dump_paths, itertools.repeat(self.overwrite), itertools.repeat(self.identity_pat)))
-        #process_map(match_identities_tweets_star, zipped, max_workers=self.n_cores, ncols=80, total=len(dump_paths))
-        list(map(match_identities_tweets_star, zipped)) # debugging, but takes a long time for some reason
+        process_map(match_identities_tweets_star, zipped, max_workers=self.n_cores, ncols=80, total=len(dump_paths))
+        #list(map(match_identities_tweets_star, zipped)) # debugging, but takes a long time for some reason
         #for el in zipped: # alternate debugging
         #    match_identities_tweets_star(el)
 
@@ -600,5 +599,5 @@ class IdentityExtractor():
 if __name__ == '__main__':
     tweet_filter = IdentityExtractor(load_vocab=True, overwrite=True, n_cores=25)
     #tweet_filter.run()
-    tweet_filter.match_bios()
-    #tweet_filter.extract_identities_tweets()
+    #tweet_filter.match_bios()
+    tweet_filter.extract_identities_tweets()
