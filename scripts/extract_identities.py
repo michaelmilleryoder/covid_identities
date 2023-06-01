@@ -16,6 +16,7 @@ import json
 import shutil
 import pickle
 import itertools
+import datetime
 
 from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map
@@ -150,6 +151,12 @@ def match_identities_tweets(tweets_fpath, dump_fpath, overwrite, identity_pat):
 
     fname = os.path.basename(tweets_fpath)
     outpath = os.path.join('../output', 'tweets_bios_identities', fname)
+
+    # Custom check to see if is old enough that needs to be rewritten
+    modified_ts = datetime.datetime.fromtimestamp(os.path.getmtime(outpath))
+    if modified_ts >= datetime.datetime(2023,5,31): # already processed recently
+        return
+
     if os.path.exists(outpath) and not overwrite: # already processed
         return
 
@@ -183,7 +190,12 @@ def match_identities_tweets(tweets_fpath, dump_fpath, overwrite, identity_pat):
     #tweets_texts = pd.DataFrame(lines).set_index('id_str')
 
     # Load tweet IDs and texts
-    tweets_bios = pd.read_json(tweets_fpath, lines=True)
+    try:
+        tweets_bios = pd.read_json(tweets_fpath, lines=True)
+    except ValueError as e:
+        tqdm.write(f'\n{e} for file {tweets_fpath}.')
+        tqdm.write('\n\tContinuing')
+        return
     tweets_bios['id_str'] = tweets_bios['id_str'].astype(str)
 
     # Merge (shouldn't be needed anymore)

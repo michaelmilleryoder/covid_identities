@@ -80,7 +80,7 @@ class BioTweetIdentityPairer:
             os.mkdir(self.out_dirpath)
         self.bio_stops = ['i', 'you', 'us', 'we', 'my', 'me', 'it', 'your', 'our', 'who', 'its', 'those', 'other', 'everyone', 
                     'people', 'don']
-        self.tweet_stops = self.bio_stops + ['they', 'he', 'his', 'their', 'she', 'her', 'hers', 'theirs',]
+        self.tweet_stops = self.bio_stops + ['they', 'he', 'him', 'his', 'their', 'them', 'she', 'her', 'hers', 'theirs', 'person']
 
     def extract_pairs(self):
         """ Extract top identity pairs in bios and tweets, save out """
