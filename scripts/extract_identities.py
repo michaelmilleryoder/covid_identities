@@ -294,6 +294,7 @@ class IdentityExtractor():
     def load_identities(self):
         """ Load, filter identities to just those that are present in the vocab
         """
+        #if False: # just run to see how many identities in vocab
         if os.path.exists(self.pat_path) and self.load_vocab:
             print("Loading identity list...")
             with open(self.pat_path, 'rb') as f:
@@ -610,6 +611,6 @@ class IdentityExtractor():
 
 if __name__ == '__main__':
     tweet_filter = IdentityExtractor(load_vocab=True, overwrite=True, n_cores=25)
-    #tweet_filter.run()
+    tweet_filter.run()
     #tweet_filter.match_bios()
-    tweet_filter.extract_identities_tweets()
+    #tweet_filter.extract_identities_tweets()
